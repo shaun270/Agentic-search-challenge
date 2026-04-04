@@ -15,21 +15,25 @@ class SemanticCache:
     """A local vector-based semantic cache for storing and retrieving pipeline results."""
 
     def __init__(self, threshold=0.85):
-        self.model = SentenceTransformer(EMBEDDING_MODEL)
-        self.dimension = self.model.get_sentence_embedding_dimension()
+        self.dimension = 384  # all-MiniLM-L6-v2 dimension
         self.threshold = threshold
-
+        self.model = None     # don't load on startup
+        self.index = faiss.IndexFlatIP(self.dimension)
+        self.cache_store = []
         os.makedirs(CACHE_DIR, exist_ok=True)
-
         if os.path.exists(INDEX_PATH) and os.path.exists(STORE_PATH):
             self.index = faiss.read_index(INDEX_PATH)
             with open(STORE_PATH, "rb") as f:
                 self.cache_store = pickle.load(f)
             print(f"[CACHE] Loaded {self.index.ntotal} cached queries from disk")
         else:
-            self.index = faiss.IndexFlatIP(self.dimension)
-            self.cache_store = []
             print("[CACHE] Starting fresh cache")
+
+    def _get_model(self):
+        if self.model is None:
+            from sentence_transformers import SentenceTransformer
+            self.model = SentenceTransformer('all-MiniLM-L6-v2')
+        return self.model
 
     def _fresh_index(self):
         """Creates a completely new empty FAISS index."""
@@ -40,7 +44,7 @@ class SemanticCache:
         """Queries the FAISS index to find a cached result exceeding the similarity threshold."""
         if self.index.ntotal == 0:
             return None
-        vec = self.model.encode([query]).astype(np.float32)
+        vec = self._get_model().encode([query]).astype(np.float32)
         faiss.normalize_L2(vec)
         distances, indices = self.index.search(vec, 1)
         best_score = distances[0][0]
@@ -73,7 +77,7 @@ class SemanticCache:
 
     def save(self, query: str, table_data: dict):
         """Embeds and saves a new query string and its final result table to the cache."""
-        vec = self.model.encode([query]).astype(np.float32)
+        vec = self._get_model().encode([query]).astype(np.float32)
         faiss.normalize_L2(vec)
         self.index.add(vec)
         self.cache_store.append({"query": query, "table": table_data})
