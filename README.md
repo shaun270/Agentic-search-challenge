@@ -15,7 +15,7 @@ It runs as a 5-stage pipeline entirely on free-tier APIs. No OpenAI, no paid inf
 
 ## Live Demo
 
-[**→ Try it here**](https://your-demo-url.onrender.com)
+[**→ Try it here**]([https://your-demo-url.onrender.com](https://agentic-search-challenge-42u8.onrender.com))
 
 > Hosted on Render free tier. May take 30 seconds to wake up on first load.
 
