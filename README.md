@@ -17,7 +17,7 @@ It runs as a 5-stage pipeline entirely on free-tier APIs. No OpenAI, no paid inf
 
 [**→ Try it here**](https://agentic-search-challenge-42u8.onrender.com)
 
-> **Note:** Hosted on Render free tier (0.1 CPU, 512MB RAM). Expect 60-90s per query on the live demo. Local performance is significantly faster — typically 20-30s.
+> **Note:** Hosted on Render free tier (0.1 CPU, 512MB RAM). Expect 60-90s per query on the live demo. Local performance is significantly faster — typically 5-10s.
 
 ## Evaluation Criteria
 
