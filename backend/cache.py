@@ -3,7 +3,6 @@ import pickle
 
 import faiss
 import numpy as np
-from sentence_transformers import SentenceTransformer
 
 # --- CONSTANTS ---
 CACHE_DIR = os.path.join(os.path.dirname(__file__), ".cache")
@@ -34,7 +33,6 @@ class SemanticCache:
             from sentence_transformers import SentenceTransformer
             self.model = SentenceTransformer('all-MiniLM-L6-v2')
         return self.model
-
     def _fresh_index(self):
         """Creates a completely new empty FAISS index."""
         index = faiss.IndexFlatIP(self.dimension)
