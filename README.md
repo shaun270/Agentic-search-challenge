@@ -19,6 +19,8 @@ It runs as a 5-stage pipeline entirely on free-tier APIs. No OpenAI, no paid inf
 
 > **Note:** Hosted on Render free tier (0.1 CPU, 512MB RAM). Expect 60-90s per query on the live demo. Local performance is significantly faster — typically 5-10s.
 
+[**→ Video Walkthrough**](https://www.youtube.com/watch?v=ckm78iBGMMY)
+
 ## Evaluation Criteria
 
 | Criterion | Where it's addressed |
