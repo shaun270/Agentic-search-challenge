@@ -21,6 +21,8 @@ It runs as a 5-stage pipeline entirely on free-tier APIs. No OpenAI, no paid inf
 
 [**→ Video Walkthrough**](https://www.youtube.com/watch?v=ckm78iBGMMY)
 
+Each cell shows the extracted value and the exact source it came from, fields that couldn't be confirmed from the scraped content are left blank rather than hallucinated.
+
 ## Evaluation Criteria
 
 | Criterion | Where it's addressed |
