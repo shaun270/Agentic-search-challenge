@@ -15,10 +15,6 @@ It runs as a 5-stage pipeline entirely on free-tier APIs. No OpenAI, no paid inf
 
 ## Live Demo
 
-[**→ Try it here**](https://agentic-search-challenge-42u8.onrender.com)
-
-> **Note:** Hosted on Render free tier (0.1 CPU, 512MB RAM). Expect 60-90s per query on the live demo. Local performance is significantly faster — typically 5-10s.
-
 [**→ Video Walkthrough**](https://www.youtube.com/watch?v=ckm78iBGMMY)
 
 Each cell shows the extracted value and the exact source it came from, fields that couldn't be confirmed from the scraped content are left blank rather than hallucinated.
