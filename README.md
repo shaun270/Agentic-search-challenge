@@ -2,7 +2,7 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=flat&logo=fastapi)](https://fastapi.tiangolo.com/)
-[![FAISS](https://img.shields.io/badge/FAISS-Local_Cache-FFaa00?style=flat)](https://github.com/facebookresearch/faiss)
+[![pgvector](https://img.shields.io/badge/pgvector-Postgres_Cache-336791?style=flat)](https://github.com/pgvector/pgvector)
 [![Groq](https://img.shields.io/badge/Groq-Llama_3-f55036?style=flat)](https://groq.com/)
 
 > Autonomous web research that turns any topic query into a structured, source-traced table of entities.
@@ -27,7 +27,7 @@ Each cell shows the extracted value and the exact source it came from, fields th
 | **Design choices** | Every decision documented in [What we tried and dropped](#what-we-tried-and-dropped) |
 | **Code structure** | 5-stage pipeline, one module per stage, Pydantic models throughout, constants at top of each file |
 | **Documentation** | This README — setup, architecture, every challenge and resolution |
-| **Complexity** | FAISS semantic cache, Vectorless RAG, SSE streaming, section chunking, batch LLM extraction, entity detail UI |
+| **Complexity** | Postgres pgvector semantic cache, Vectorless RAG, SSE streaming, section chunking, batch LLM extraction, entity detail UI |
 
 ## Architecture
 
@@ -53,7 +53,7 @@ The keyword router scores each page's sections by how many schema field keywords
 Groups duplicate entities by fuzzy name matching (substring and prefix), then merges each group into one record by picking the longest non-null value per field. No LLM call — deterministic and instantaneous. Results are sorted by confidence and filtered to drop entities where more than 60% of fields are null.
 
 ### Semantic Cache (`cache.py`)
-Before Stage 1 runs, the query is embedded with `all-MiniLM-L6-v2` and compared against previously cached queries in a FAISS index. A cosine similarity above 0.85 triggers a cache hit and returns the stored result instantly. The index and result store are persisted to disk so the cache survives server restarts.
+Before Stage 1 runs, the query is embedded with `all-MiniLM-L6-v2` and compared against previously cached queries in a Postgres pgvector database. A cosine similarity indicating a score above 0.85 triggers a cache hit and returns the stored result instantly. The data is persisted in Postgres so the cache survives server restarts.
 
 ## Technical Decisions
 
@@ -68,8 +68,8 @@ Instead of running one LLM call per page, 12 pages meant 12 calls, 12x the rate 
 ### Pure Python Merger
 Instead of using an an LLM a pure python merger was used to intelligently pick the best value per field when merging duplicates. Fuzzy name grouping by substring matching, best value selected as the longest non-null string were some of its functions. Saved 10-16k tokens per query and made Stage 5 instantaneous. The LLM would do the work that a simple heuristic handles well enough for this use case.
 
-### FAISS Semantic Cache
-Exact-match caching would miss `"AI startups in healthcare"` vs `"healthcare AI companies"` — same intent, different string. The cache embeds every query with `all-MiniLM-L6-v2` and stores it in a FAISS index. On each new query, cosine similarity is checked against all cached queries, a score above 0.85 returns the cached result instantly. The index is persisted to disk so it survives restarts.
+### Postgres pgvector Semantic Cache
+Exact-match caching would miss `"AI startups in healthcare"` vs `"healthcare AI companies"` — same intent, different string. The cache embeds every query with `all-MiniLM-L6-v2` and stores it in a Postgres pgvector database. On each new query, cosine distance is checked against all cached queries, a similarity score above 0.85 returns the cached result instantly. The cache is persisted in the database so it survives restarts.
 
 ### SSE Streaming
 The pipeline takes 20-40 seconds end to end. Returning a single JSON response at the end would leave the user staring at a blank screen. Server-Sent Events let the backend push stage updates to the frontend as they happen, the user sees each stage complete in real time, the search plan appears as soon as Stage 1 finishes, and results render the moment Stage 5 is done.
@@ -122,31 +122,25 @@ The first version of the RAG router used Llama 3.1 8b to read a table of content
 - Serper API key → [serper.dev](https://serper.dev) — 2,500 free searches, no credit card
   - Optional — leave blank to use DuckDuckGo
 
-### Install
+### Install & Configure
 ```bash
 git clone https://github.com/shaun270/Agentic-search.git
 cd Agentic-search
 
-python -m venv venv
-source venv/bin/activate   # Windows: venv\Scripts\activate
-
-pip install -r backend/requirements.txt
-```
-
-### Configure
-```bash
 cp .env.example .env
 ```
 
-`.env`:
+Edit your `.env` file to add your keys:
 ```
 GROQ_API_KEY=gsk_...
 SERPER_API_KEY=...    # optional
 ```
 
-### Run
+### Run (with Docker)
+Since the app uses a PostgreSQL database with pgvector, running with Docker Compose is recommended.
+
 ```bash
-python run.py
+docker-compose up --build
 # → http://localhost:8000
 ```
 
@@ -166,7 +160,7 @@ python run.py
 ```text
 agentic-search/
 ├── backend/
-│   ├── cache.py       # FAISS Semantic Memory engine
+│   ├── cache.py       # Postgres pgvector Semantic Memory engine
 │   ├── main.py        # FastAPI server & SSE orchestrator
 │   ├── models.py      # Pydantic schemas (FinalTable, Entity, etc.)
 │   └── pipeline/
