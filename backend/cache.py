@@ -1,90 +1,143 @@
 import os
-import pickle
-
-import faiss
+import json
+import psycopg2
+from pgvector.psycopg2 import register_vector
 import numpy as np
 
 # --- CONSTANTS ---
-CACHE_DIR = os.path.join(os.path.dirname(__file__), ".cache")
-INDEX_PATH = os.path.join(CACHE_DIR, "faiss.index")
-STORE_PATH = os.path.join(CACHE_DIR, "store.pkl")
 EMBEDDING_MODEL = 'all-MiniLM-L6-v2'
+# Allow overriding the DATABASE_URL, fallback to a default dev connection
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:password@localhost:5432/agentic_search")
 
 class SemanticCache:
-    """A local vector-based semantic cache for storing and retrieving pipeline results."""
+    """A Postgres vector-based semantic cache for storing and retrieving pipeline results."""
 
     def __init__(self, threshold=0.85):
         self.dimension = 384  # all-MiniLM-L6-v2 dimension
         self.threshold = threshold
         self.model = None     # don't load on startup
-        self.index = faiss.IndexFlatIP(self.dimension)
-        self.cache_store = []
-        os.makedirs(CACHE_DIR, exist_ok=True)
-        if os.path.exists(INDEX_PATH) and os.path.exists(STORE_PATH):
-            self.index = faiss.read_index(INDEX_PATH)
-            with open(STORE_PATH, "rb") as f:
-                self.cache_store = pickle.load(f)
-            print(f"[CACHE] Loaded {self.index.ntotal} cached queries from disk")
-        else:
-            print("[CACHE] Starting fresh cache")
+        self._init_db()
+
+    def _init_db(self):
+        """Creates the pgvector extension and the cache table if they don't exist."""
+        try:
+            conn = psycopg2.connect(DATABASE_URL)
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cached_queries (
+                        id SERIAL PRIMARY KEY,
+                        query_text TEXT NOT NULL,
+                        embedding vector(384),
+                        table_data JSONB NOT NULL
+                    );
+                """)
+            conn.close()
+            print("[CACHE] Postgres pgvector initialized.")
+        except Exception as e:
+            print(f"[CACHE] Error initializing Postgres: {e}")
+
+    def _get_conn(self):
+        """Returns a new psycopg2 connection with pgvector registered."""
+        conn = psycopg2.connect(DATABASE_URL)
+        register_vector(conn)
+        return conn
 
     def _get_model(self):
+        """Lazy loads the sentence-transformer model."""
         if self.model is None:
             from sentence_transformers import SentenceTransformer
             self.model = SentenceTransformer('all-MiniLM-L6-v2')
         return self.model
-    def _fresh_index(self):
-        """Creates a completely new empty FAISS index."""
-        index = faiss.IndexFlatIP(self.dimension)
-        return index
 
     def search(self, query: str):
-        """Queries the FAISS index to find a cached result exceeding the similarity threshold."""
-        if self.index.ntotal == 0:
-            return None
-        vec = self._get_model().encode([query]).astype(np.float32)
-        faiss.normalize_L2(vec)
-        distances, indices = self.index.search(vec, 1)
-        best_score = distances[0][0]
-        best_idx = indices[0][0]
-        if best_score >= self.threshold and best_idx != -1:
-            print(f"[CACHE HIT] score={best_score:.2f} for '{query}'")
-            entry = self.cache_store[best_idx]
-            if isinstance(entry, dict) and "table" in entry:
-                return entry
+        """Queries the Postgres pgvector to find a cached result exceeding the similarity threshold."""
+        vec = self._get_model().encode([query])[0]
+        
+        # Calculate cosine distance threshold. Cosine similarity = 1 - cosine_distance
+        # If similarity threshold is 0.85, max distance is 0.15
+        max_distance = 1.0 - self.threshold
+        
+        try:
+            conn = self._get_conn()
+            with conn.cursor() as cur:
+                # <=> is the cosine distance operator in pgvector
+                cur.execute(
+                    """
+                    SELECT query_text, table_data, embedding <=> %s AS distance
+                    FROM cached_queries
+                    ORDER BY distance ASC
+                    LIMIT 1;
+                    """,
+                    (vec,)
+                )
+                row = cur.fetchone()
+                
+            conn.close()
+            
+            if row:
+                query_text, table_data, distance = row
+                if distance <= max_distance:
+                    score = 1.0 - distance
+                    print(f"[CACHE HIT] score={score:.2f} for '{query}'")
+                    return {"query": query_text, "table": table_data}
+                
+                print(f"[CACHE MISS] best={1.0 - distance:.2f} for '{query}'")
             else:
-                return {"query": query, "table": entry}
-        print(f"[CACHE MISS] best={best_score:.2f} for '{query}'")
-        return None
+                print(f"[CACHE MISS] no entries in cache for '{query}'")
+                
+            return None
+        except Exception as e:
+            print(f"[CACHE] Search error: {e}")
+            return None
 
     def search_all(self) -> list[dict]:
         """Returns metadata for all globally cached entries."""
-        results = []
-        for entry in self.cache_store:
-            if isinstance(entry, dict) and "table" in entry:
-                results.append({
-                    "query": entry.get("query", ""),
-                    "entity_count": len(entry["table"].get("entities", [])),
-                })
-            else:
-                results.append({
-                    "query": "",
-                    "entity_count": len(entry.get("entities", [])) if isinstance(entry, dict) else 0,
-                })
-        return results
+        try:
+            conn = self._get_conn()
+            results = []
+            with conn.cursor() as cur:
+                cur.execute("SELECT query_text, table_data FROM cached_queries;")
+                rows = cur.fetchall()
+                for query_text, table_data in rows:
+                    results.append({
+                        "query": query_text,
+                        "entity_count": len(table_data.get("entities", [])),
+                    })
+            conn.close()
+            return results
+        except Exception as e:
+            print(f"[CACHE] Search_all error: {e}")
+            return []
 
     def save(self, query: str, table_data: dict):
-        """Embeds and saves a new query string and its final result table to the cache."""
-        vec = self._get_model().encode([query]).astype(np.float32)
-        faiss.normalize_L2(vec)
-        self.index.add(vec)
-        self.cache_store.append({"query": query, "table": table_data})
-        self._save_to_disk()
-        print(f"[CACHE SAVED] '{query}' — {self.index.ntotal} total cached")
-    
-    def _save_to_disk(self):
-        """Persists the FAISS index and local store to the file system."""
-        os.makedirs(CACHE_DIR, exist_ok=True)
-        faiss.write_index(self.index, INDEX_PATH)
-        with open(STORE_PATH, "wb") as f:
-            pickle.dump(self.cache_store, f)
+        """Embeds and saves a new query string and its final result table to Postgres."""
+        vec = self._get_model().encode([query])[0]
+        try:
+            conn = self._get_conn()
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO cached_queries (query_text, embedding, table_data)
+                    VALUES (%s, %s, %s);
+                    """,
+                    (query, vec, json.dumps(table_data))
+                )
+            conn.commit()
+            conn.close()
+            print(f"[CACHE SAVED] '{query}'")
+        except Exception as e:
+            print(f"[CACHE] Save error: {e}")
+
+    def clear(self):
+        """Truncates the cache table."""
+        try:
+            conn = self._get_conn()
+            with conn.cursor() as cur:
+                cur.execute("TRUNCATE cached_queries;")
+            conn.commit()
+            conn.close()
+            print("[CACHE] Cleared successfully.")
+        except Exception as e:
+            print(f"[CACHE] Clear error: {e}")

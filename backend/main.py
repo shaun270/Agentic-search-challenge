@@ -176,12 +176,8 @@ async def list_cache():
 
 @app.delete("/api/cache")
 async def clear_cache():
-    """Deletes the cache folder entirely and instantiates a fresh internal state."""
-    cache_dir = os.path.join(os.path.dirname(__file__), ".cache")
-    if os.path.exists(cache_dir):
-        shutil.rmtree(cache_dir)
-    query_cache.index = query_cache._fresh_index()
-    query_cache.cache_store = []
+    """Deletes all entries from the postgres cache table."""
+    query_cache.clear()
     return {"message": "Cache cleared"}
 
 if os.path.isdir(FRONTEND_PATH):
