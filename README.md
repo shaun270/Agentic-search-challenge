@@ -4,6 +4,9 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=flat&logo=fastapi)](https://fastapi.tiangolo.com/)
 [![pgvector](https://img.shields.io/badge/pgvector-Postgres_Cache-336791?style=flat)](https://github.com/pgvector/pgvector)
 [![Groq](https://img.shields.io/badge/Groq-Llama_3-f55036?style=flat)](https://groq.com/)
+[![Docker](https://img.shields.io/badge/Docker-containerized-2496ED?style=flat&logo=docker)](https://www.docker.com/)
+[![AWS EC2](https://img.shields.io/badge/AWS-EC2_deployed-FF9900?style=flat&logo=amazonaws)](https://aws.amazon.com/ec2/)
+[![CI/CD](https://img.shields.io/badge/GitHub_Actions-CI%2FCD-2088FF?style=flat&logo=githubactions)](https://github.com/features/actions)
 
 > Autonomous web research that turns any topic query into a structured, source-traced table of entities.
 
@@ -15,7 +18,9 @@ It runs as a 5-stage pipeline entirely on free-tier APIs. No OpenAI, no paid inf
 
 ## Live Demo
 
-[**→ Video Walkthrough**](https://www.youtube.com/watch?v=ckm78iBGMMY)
+[**→ Try it here**](http://18.221.112.71:8000)
+
+Deployed on AWS EC2 (t3.micro) with Docker. Video walkthrough: [YouTube](https://www.youtube.com/watch?v=ckm78iBGMMY)
 
 Each cell shows the extracted value and the exact source it came from, fields that couldn't be confirmed from the scraped content are left blank rather than hallucinated.
 
@@ -135,6 +140,24 @@ Edit your `.env` file to add your keys:
 GROQ_API_KEY=gsk_...
 SERPER_API_KEY=...    # optional
 ```
+## Deployment
+
+The app is containerized with Docker and deployed on AWS EC2.
+
+### Infrastructure
+- **AWS EC2** — t3.micro instance (Ubuntu 22.04) serving the app at a public IP
+- **Docker Compose** — orchestrates the FastAPI app and PostgreSQL containers together
+- **pgvector** — runs inside Postgres container, persists vector cache across restarts
+- **GitHub Actions** — CI/CD pipeline that SSHes into EC2 and redeploys on every push to main
+
+### Run locally
+```bash
+docker compose up --build
+# → http://localhost:8000
+```
+
+### CI/CD
+Every push to `main` triggers `.github/workflows/deploy.yml` which pulls the latest code and rebuilds the containers on EC2 automatically.
 
 ### Run (with Docker)
 Since the app uses a PostgreSQL database with pgvector, running with Docker Compose is recommended.
