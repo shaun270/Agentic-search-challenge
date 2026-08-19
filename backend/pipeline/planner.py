@@ -5,8 +5,10 @@ from groq import AsyncGroq
 from backend.models import SearchPlan
 
 # --- CONSTANTS ---
-LLM_MODEL = "llama-3.3-70b-versatile"
-LLM_MAX_TOKENS = 800
+# Groq retired llama-3.3-70b-versatile. gpt-oss-120b is capped at 8k TPM on the
+# free tier, which is ample for a single planning call but not for extraction.
+LLM_MODEL = "openai/gpt-oss-120b"
+LLM_MAX_TOKENS = 1200
 
 SYSTEM_PROMPT = """\
 You are a research planning assistant. Given a topic query, produce a structured
@@ -50,6 +52,7 @@ async def plan_search(topic: str, client: AsyncGroq) -> SearchPlan:
     response = await client.chat.completions.create(
         model=LLM_MODEL,
         max_tokens=LLM_MAX_TOKENS,
+        response_format={"type": "json_object"},
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": USER_PROMPT.format(topic=topic)},

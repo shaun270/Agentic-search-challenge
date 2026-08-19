@@ -7,8 +7,11 @@ from groq import AsyncGroq
 from backend.models import Entity, ScrapedPage, SearchPlan, SourcedValue
 
 # --- CONSTANTS ---
-LLM_MODEL = "llama-3.3-70b-versatile"
-LLM_MAX_TOKENS = 8000
+# Extraction is the token-hungry stage. Plain chat models sit on an 8k TPM free-tier
+# bucket, and Groq reserves prompt + max_tokens up front, so an 8000 reservation 429s
+# before a single page of context fits. groq/compound has its own 70k TPM bucket.
+LLM_MODEL = "groq/compound"
+LLM_MAX_TOKENS = 4000
 LLM_TEMPERATURE = 0.1
 MAX_RETRIES = 3
 
