@@ -10,6 +10,9 @@ from backend.models import SearchPlan
 LLM_MODEL = "openai/gpt-oss-120b"
 LLM_MAX_TOKENS = 1200
 
+# Hard ceiling on how wide a table the planner may propose.
+MAX_SCHEMA_FIELDS = 6
+
 SYSTEM_PROMPT = """\
 You are a research planning assistant. Given a topic query, produce a structured
 search plan. Respond ONLY with a valid JSON object — no markdown fences, no preamble.
@@ -31,7 +34,9 @@ Produce a JSON object with these exact keys:
 }}
 
 Rules:
-- schema_fields: 5–8 most useful attributes. Always start with "name".
+- schema_fields: 4–6 most useful attributes, and no more. Always start with "name".
+  Choose attributes a directory or listing page would actually state for every
+  entity. Prefer short factual values over descriptive ones.
   Examples — startups: name, founded, funding, focus_area, headquarters, key_product, founders
              restaurants: name, cuisine, neighborhood, price_range, notable_dish, rating
              software: name, license, language, stars, use_case, latest_version
@@ -65,4 +70,14 @@ async def plan_search(topic: str, client: AsyncGroq) -> SearchPlan:
             text = text[4:]
         text = text.rsplit("```", 1)[0]
     data = json.loads(text)
-    return SearchPlan(**data)
+    plan = SearchPlan(**data)
+
+    # A wide schema is the main driver of extraction failure: each extra field
+    # multiplies both the JSON the model must emit and the reasoning it does first.
+    # A 7-field schema measured 2.5x the output tokens of a 3-field one on the same
+    # page, which is what pushed responses past the completion ceiling.
+    if len(plan.schema_fields) > MAX_SCHEMA_FIELDS:
+        print(f"[planner] trimming schema from {len(plan.schema_fields)} to {MAX_SCHEMA_FIELDS} fields")
+        plan.schema_fields = plan.schema_fields[:MAX_SCHEMA_FIELDS]
+
+    return plan
