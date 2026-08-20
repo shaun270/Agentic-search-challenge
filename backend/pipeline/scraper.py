@@ -11,8 +11,13 @@ from backend.models import ScrapedPage, SearchResult
 # --- CONSTANTS ---
 MAX_CONTENT_CHARS = 12000
 MAX_CHUNK_CHARS = 6000
-SCRAPE_TIMEOUT = 12
-CONCURRENCY = 8
+SCRAPE_TIMEOUT = 5
+CONCURRENCY = 16
+
+# Hard wall-clock deadline for the whole scrape stage. A per-request timeout alone
+# does not bound the stage: one slow host still costs its full timeout while the
+# rest sit finished. Whatever has landed by the deadline is what gets extracted.
+SCRAPE_DEADLINE = 5.0
 
 # Login-walled or JS-only domains that reliably return a shell with no usable text.
 # Review sites are deliberately absent: they carry exactly the attributes
@@ -251,11 +256,31 @@ async def _scrape_one(
                 content=result.snippet, error=str(e)
             )
 
-async def scrape_pages(results: list[SearchResult]) -> list[ScrapedPage]:
-    """Coordinates concurrent scraping across a list of search results."""
+async def scrape_pages(
+    results: list[SearchResult], deadline: float = SCRAPE_DEADLINE
+) -> list[ScrapedPage]:
+    """Scrapes concurrently and returns whatever completed before the deadline."""
     sem = asyncio.Semaphore(CONCURRENCY)
+    pages: list[ScrapedPage] = []
+
     async with httpx.AsyncClient() as client:
-        pages = await asyncio.gather(
-            *[_scrape_one(r, client, sem) for r in results]
-        )
-    return [p for p in pages if p.content and len(p.content) > 50]
+        tasks = [
+            asyncio.create_task(_scrape_one(r, client, sem)) for r in results
+        ]
+        done, pending = await asyncio.wait(tasks, timeout=deadline)
+
+        for task in pending:
+            task.cancel()
+        if pending:
+            print(f"[scraper] deadline hit — abandoned {len(pending)} slow pages")
+            await asyncio.gather(*pending, return_exceptions=True)
+
+        for task in done:
+            try:
+                pages.append(task.result())
+            except Exception as e:
+                print(f"[scraper] task failed: {str(e)[:80]}")
+
+    kept = [p for p in pages if p.content and len(p.content) > 50]
+    print(f"[scraper] {len(kept)} usable pages from {len(results)} results")
+    return kept
