@@ -11,11 +11,16 @@ class SearchPlan(BaseModel):
     field_synonyms: dict[str, list[str]] = {}
 
 class SourcedValue(BaseModel):
-    """An extracted value coupled with its source URL and verbatim snippet."""
+    """An extracted value coupled with its source URL, verbatim snippet and confidence."""
 
     value: Any
     source_url: str
     source_snippet: str = ""
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    # Human-readable justification for the score, surfaced in the UI on low confidence.
+    confidence_reason: str = ""
+    # Distinct domains that independently reported this same value.
+    agreement_count: int = 1
 
     @field_validator("source_snippet", mode="before")
     @classmethod
@@ -29,6 +34,20 @@ class Entity(BaseModel):
     name: str
     attributes: dict[str, SourcedValue]
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+
+    def fill_ratio(self, fields: list[str]) -> float:
+        """Fraction of the given fields that carry a non-empty value."""
+        if not fields:
+            return 0.0
+        filled = sum(1 for f in fields if self.has_value(f))
+        return filled / len(fields)
+
+    def has_value(self, field: str) -> bool:
+        """True when the field holds a real value rather than a null or empty placeholder."""
+        sv = self.attributes.get(field)
+        if sv is None or sv.value is None:
+            return False
+        return str(sv.value).strip().lower() not in ("", "null", "none", "n/a", "unknown", "-")
 
 class SearchResult(BaseModel):
     """A single raw web search result output before scraping."""
@@ -56,3 +75,6 @@ class FinalTable(BaseModel):
     entities: list[Entity]
     search_queries_used: list[str]
     sources: list[str]
+    # Fields the planner proposed that too few entities could support, dropped by
+    # the column audit so the table never renders a mostly-blank column.
+    dropped_fields: list[str] = []

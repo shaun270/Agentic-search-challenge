@@ -20,14 +20,14 @@ HEADERS = {
 }
 
 async def _serper_search_one(
-    query: str, api_key: str, client: httpx.AsyncClient
+    query: str, api_key: str, client: httpx.AsyncClient, num: int = RESULTS_PER_QUERY
 ) -> list[SearchResult]:
     """Fetches search results for a single query using the Serper.dev API."""
     try:
         resp = await client.post(
             SERPER_API_URL,
             headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
-            json={"q": query, "num": RESULTS_PER_QUERY},
+            json={"q": query, "num": num},
             timeout=10,
         )
         resp.raise_for_status()
@@ -44,11 +44,13 @@ async def _serper_search_one(
         print(f"Serper error for '{query}': {e}")
         return []
 
-async def _serper_search(queries: list[str], api_key: str) -> list[SearchResult]:
+async def _serper_search(
+    queries: list[str], api_key: str, num: int = RESULTS_PER_QUERY
+) -> list[SearchResult]:
     """Gathers concurrent SearchResult objects using the Serper backend."""
     async with httpx.AsyncClient() as client:
         batches = await asyncio.gather(
-            *[_serper_search_one(q, api_key, client) for q in queries]
+            *[_serper_search_one(q, api_key, client, num) for q in queries]
         )
     return [r for batch in batches for r in batch]
 
@@ -107,11 +109,11 @@ async def _ddg_search(queries: list[str]) -> list[SearchResult]:
     return results
 
 async def search_web(
-    queries: list[str], api_key: str | None
+    queries: list[str], api_key: str | None, num: int = RESULTS_PER_QUERY
 ) -> tuple[list[SearchResult], list[str]]:
     """Public interface routing queries to the appropriate search backend and returning deduplicated URLs."""
     if api_key:
-        raw = await _serper_search(queries, api_key)
+        raw = await _serper_search(queries, api_key, num)
         backend = "Serper"
     else:
         raw = await _ddg_search(queries)

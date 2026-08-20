@@ -1,8 +1,18 @@
 import os
 import json
-import psycopg2
-from pgvector.psycopg2 import register_vector
+
 import numpy as np
+
+# The semantic cache is a latency optimisation, not a dependency. If the Postgres
+# driver or the server is unavailable the pipeline must still answer queries, so
+# the import is optional and every operation degrades to a no-op.
+try:
+    import psycopg2
+    from pgvector.psycopg2 import register_vector
+
+    PGVECTOR_AVAILABLE = True
+except ImportError:
+    PGVECTOR_AVAILABLE = False
 
 # --- CONSTANTS ---
 EMBEDDING_MODEL = 'all-MiniLM-L6-v2'
@@ -16,9 +26,11 @@ class SemanticCache:
         self.dimension = 384  # all-MiniLM-L6-v2 dimension
         self.threshold = threshold
         self.model = None     # don't load on startup
-        self._init_db()
+        self.enabled = PGVECTOR_AVAILABLE and self._init_db()
+        if not self.enabled:
+            print("[CACHE] Disabled — running without the semantic cache.")
 
-    def _init_db(self):
+    def _init_db(self) -> bool:
         """Creates the pgvector extension and the cache table if they don't exist."""
         try:
             conn = psycopg2.connect(DATABASE_URL)
@@ -35,8 +47,10 @@ class SemanticCache:
                 """)
             conn.close()
             print("[CACHE] Postgres pgvector initialized.")
+            return True
         except Exception as e:
             print(f"[CACHE] Error initializing Postgres: {e}")
+            return False
 
     def _get_conn(self):
         """Returns a new psycopg2 connection with pgvector registered."""
@@ -53,7 +67,13 @@ class SemanticCache:
 
     def search(self, query: str):
         """Queries the Postgres pgvector to find a cached result exceeding the similarity threshold."""
-        vec = self._get_model().encode([query])[0]
+        if not self.enabled:
+            return None
+        try:
+            vec = self._get_model().encode([query])[0]
+        except Exception as e:
+            print(f"[CACHE] Embedding failed, skipping cache: {e}")
+            return None
         
         # Calculate cosine distance threshold. Cosine similarity = 1 - cosine_distance
         # If similarity threshold is 0.85, max distance is 0.15
@@ -94,6 +114,8 @@ class SemanticCache:
 
     def search_all(self) -> list[dict]:
         """Returns metadata for all globally cached entries."""
+        if not self.enabled:
+            return []
         try:
             conn = self._get_conn()
             results = []
@@ -113,8 +135,10 @@ class SemanticCache:
 
     def save(self, query: str, table_data: dict):
         """Embeds and saves a new query string and its final result table to Postgres."""
-        vec = self._get_model().encode([query])[0]
+        if not self.enabled:
+            return
         try:
+            vec = self._get_model().encode([query])[0]
             conn = self._get_conn()
             with conn.cursor() as cur:
                 cur.execute(
@@ -132,6 +156,8 @@ class SemanticCache:
 
     def clear(self):
         """Truncates the cache table."""
+        if not self.enabled:
+            return
         try:
             conn = self._get_conn()
             with conn.cursor() as cur:

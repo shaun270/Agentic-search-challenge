@@ -3,12 +3,25 @@ import re
 from backend.models import Entity, SearchPlan, SourcedValue
 
 # --- CONSTANTS ---
-NULL_RATIO_THRESHOLD = 0.6
-MIN_ENTITIES_FALLBACK = 5
+# Two names are the same entity if one contains the other AND they are close in
+# length. Bare containment collapsed unrelated rows together: "Ora" is a substring
+# of "Corallo", which merged 16 extracted entities down to 1.
+NAME_LENGTH_RATIO = 0.7
 
 def _normalize(name: str) -> str:
     """Normalizes an entity name to alphanumeric characters for accurate matching."""
     return re.sub(r"[^a-z0-9]", "", name.lower())
+
+def _same_entity(a: str, b: str) -> bool:
+    """True when two normalized names plausibly denote the same entity."""
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    if a in b or b in a:
+        shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
+        return len(shorter) / len(longer) >= NAME_LENGTH_RATIO
+    return False
 
 def _group_entities(entities: list[Entity]) -> list[list[Entity]]:
     """Groups identically or similarly named entities together."""
@@ -20,54 +33,61 @@ def _group_entities(entities: list[Entity]) -> list[list[Entity]]:
         group = [e]
         used.add(i)
         norm_i = _normalize(e.name)
-        for j, e2 in enumerate(entities):
+        for j in range(i + 1, len(entities)):
             if j in used:
                 continue
-            norm_j = _normalize(e2.name)
-            if norm_i in norm_j or norm_j in norm_i:
-                group.append(e2)
+            if _same_entity(norm_i, _normalize(entities[j].name)):
+                group.append(entities[j])
                 used.add(j)
         groups.append(group)
     return groups
 
 def _best_value(candidates: list[SourcedValue]) -> SourcedValue:
-    """Selects the longest non-null sourced value from a list of candidates."""
-    non_null = [c for c in candidates if c.value is not None]
-    if not non_null:
-        return candidates[0]
-    return max(non_null, key=lambda c: len(str(c.value)))
+    """Selects the best-evidenced value from a list of candidates.
+
+    Previously this returned the longest string, on the theory that longer meant
+    more informative. In practice it meant a hedging sentence beat the real answer:
+    "prices vary depending on the season" outranked "$$".
+    """
+    grounded = [
+        c for c in candidates
+        if c.source_snippet and str(c.value).lower() in c.source_snippet.lower()
+    ]
+    pool = grounded or candidates
+    # Prefer a value backed by a quote; break ties toward the more concise answer,
+    # which for an attribute is almost always the more precise one.
+    return min(pool, key=lambda c: (not c.source_snippet, len(str(c.value))))
 
 def _merge_group(group: list[Entity], schema_fields: list[str]) -> Entity:
     """Condenses a group of duplicate entities into a single entity containing the best attributes."""
-    best = max(group, key=lambda e: e.confidence)
-    merged_conf = max(e.confidence for e in group)
+    best = max(group, key=lambda e: len(e.attributes))
 
     attributes: dict[str, SourcedValue] = {}
     for field in schema_fields:
-        candidates = []
-        for e in group:
-            if field in e.attributes:
-                candidates.append(e.attributes[field])
+        candidates = [
+            e.attributes[field] for e in group
+            if field in e.attributes and e.has_value(field)
+        ]
+        # A field nothing could fill is simply absent. Writing an explicit null here
+        # is what produced the column of em-dashes; the column audit decides what to
+        # do about a field the sources could not support.
         if candidates:
             attributes[field] = _best_value(candidates)
-        else:
-            attributes[field] = SourcedValue(value=None, source_url="", source_snippet="")
 
-    return Entity(name=best.name, attributes=attributes, confidence=merged_conf)
+    return Entity(name=best.name, attributes=attributes, confidence=0.0)
 
 async def merge_entities(entities, plan) -> list[Entity]:
-    """Deduplicates raw entities and filters out sparse results."""
+    """Deduplicates raw entities across shards without discarding sparse ones.
+
+    Filtering happens later, in the column audit, which can only judge a row once
+    it knows which columns survived.
+    """
     if not entities:
         return []
 
+    fields = [f for f in plan.schema_fields if f.lower() != "name"]
     groups = _group_entities(entities)
-    merged = [_merge_group(g, plan.schema_fields) for g in groups]
-    merged = sorted(merged, key=lambda e: e.confidence, reverse=True)
+    merged = [_merge_group(g, fields) for g in groups]
 
-    def null_ratio(e: Entity) -> float:
-        """Calculates the percentage of fields that are null."""
-        nulls = sum(1 for v in e.attributes.values() if v.value is None)
-        return nulls / max(len(e.attributes), 1)
-
-    filtered = [e for e in merged if null_ratio(e) < NULL_RATIO_THRESHOLD]
-    return filtered if filtered else merged[:MIN_ENTITIES_FALLBACK]
+    print(f"[merger] {len(entities)} raw -> {len(merged)} unique entities")
+    return merged
