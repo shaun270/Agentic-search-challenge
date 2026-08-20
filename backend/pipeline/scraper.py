@@ -1,6 +1,7 @@
 import asyncio
 import json
 import re
+from typing import Callable
 from urllib.parse import urlparse
 
 import httpx
@@ -195,6 +196,35 @@ def _parse_structure(html: str, url: str) -> tuple[dict, dict, str]:
     return final_map, final_chunks, "\n".join(fallback_parts)[:MAX_CONTENT_CHARS]
 
 async def _scrape_one(
+    result: SearchResult,
+    client: httpx.AsyncClient,
+    sem: asyncio.Semaphore,
+    on_event: Callable[[dict], None] | None = None,
+) -> ScrapedPage:
+    """Fetches one page and reports the outcome to on_event as soon as it settles."""
+    if on_event:
+        on_event({
+            "status": "fetching",
+            "url": result.url,
+            "domain": urlparse(result.url).netloc.replace("www.", ""),
+        })
+
+    page = await _fetch_one(result, client, sem)
+
+    if on_event:
+        on_event({
+            "status": "error" if page.error else "ok",
+            "url": page.url,
+            "domain": urlparse(page.url).netloc.replace("www.", ""),
+            "title": page.title[:90],
+            "chars": len(page.content),
+            "sections": len(page.chunks),
+            "structured": "sec_jsonld" in page.chunks,
+            "detail": page.error or "",
+        })
+    return page
+
+async def _fetch_one(
     result: SearchResult, client: httpx.AsyncClient, sem: asyncio.Semaphore
 ) -> ScrapedPage:
     """Asynchronously fetches and processes a single webpage, handling redirects and basic anti-bot blockers."""
@@ -257,15 +287,21 @@ async def _scrape_one(
             )
 
 async def scrape_pages(
-    results: list[SearchResult], deadline: float = SCRAPE_DEADLINE
+    results: list[SearchResult],
+    deadline: float = SCRAPE_DEADLINE,
+    on_event: Callable[[dict], None] | None = None,
 ) -> list[ScrapedPage]:
-    """Scrapes concurrently and returns whatever completed before the deadline."""
+    """Scrapes concurrently and returns whatever completed before the deadline.
+
+    on_event, if given, is called with a small dict as each page settles, so a
+    caller streaming to a UI can report progress while the stage is still running.
+    """
     sem = asyncio.Semaphore(CONCURRENCY)
     pages: list[ScrapedPage] = []
 
     async with httpx.AsyncClient() as client:
         tasks = [
-            asyncio.create_task(_scrape_one(r, client, sem)) for r in results
+            asyncio.create_task(_scrape_one(r, client, sem, on_event)) for r in results
         ]
         done, pending = await asyncio.wait(tasks, timeout=deadline)
 
@@ -273,6 +309,8 @@ async def scrape_pages(
             task.cancel()
         if pending:
             print(f"[scraper] deadline hit — abandoned {len(pending)} slow pages")
+            if on_event:
+                on_event({"status": "timeout", "count": len(pending)})
             await asyncio.gather(*pending, return_exceptions=True)
 
         for task in done:

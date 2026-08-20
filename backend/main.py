@@ -125,9 +125,33 @@ async def run_pipeline(query: str) -> AsyncGenerator[str, None]:
         "message": f"Found {len(search_results)} unique URLs to explore"
     })
 
-    yield sse_event("status", {"stage": 3, "message": "Scraping web pages in parallel…"})
+    yield sse_event("status", {"stage": 3, "message": "Reading pages…"})
     try:
-        pages = await scrape_pages(search_results)
+        # scrape_pages reports each page through a callback, but a callback cannot
+        # yield from this generator. A queue bridges the two so the client sees
+        # every page land while the stage is still running, instead of one summary
+        # line after it finishes.
+        events: asyncio.Queue = asyncio.Queue()
+        scrape_task = asyncio.create_task(
+            scrape_pages(search_results, on_event=events.put_nowait)
+        )
+
+        while True:
+            drain = asyncio.create_task(events.get())
+            done, _ = await asyncio.wait(
+                {drain, scrape_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if drain in done:
+                yield sse_event("source", drain.result())
+                continue
+            drain.cancel()
+            break
+
+        # The stage is finished; flush anything still queued.
+        while not events.empty():
+            yield sse_event("source", events.get_nowait())
+
+        pages = await scrape_task
     except Exception as e:
         yield sse_event("error", {"message": f"Scraping failed: {e}"})
         return
