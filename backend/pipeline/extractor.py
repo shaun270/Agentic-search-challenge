@@ -28,22 +28,50 @@ EXTRACTION_SHARDS: list[tuple[str, bool]] = [
 # spends ~2000 tokens on its own preamble and missed the deadline on every run
 # measured, so its share of the pages was discarded rather than extracted.
 
-# Wall-clock ceiling for the whole extraction stage. Shards run concurrently, so a
-# single slow model would otherwise set the latency of the entire query. Whatever
-# has returned by the deadline is used; the rest are abandoned.
-EXTRACT_DEADLINE = 5.0
+# Wall-clock budget for the extraction stage. Shards run concurrently, so a single
+# slow model would otherwise set the latency of the entire query.
+#
+# A fixed cutoff is the wrong shape: set it tight and a run where every shard is
+# briefly slow returns nothing at all, set it loose and every query pays for the
+# slowest model. So the stage waits up to EXTRACT_DEADLINE for the *first* shard
+# to land, then gives the stragglers only EXTRACT_GRACE more. In the common case
+# it returns as soon as the fast shard is home.
+EXTRACT_DEADLINE = 6.5
+EXTRACT_GRACE = 2.0
 
 # Must comfortably exceed the largest expected response. In json_object mode Groq
 # validates the completion server-side, so a response truncated at the cap comes
 # back as a hard 400 rather than as repairable text.
-LLM_MAX_TOKENS = 2400
+#
+# The old value of 2400 was not a safe ceiling. Routed prompts run ~1600 tokens, so
+# there is ample room inside the 8k bucket, and running the budget close to the
+# wire is what produced empty batches.
+LLM_MAX_TOKENS = 4000
+
+# gpt-oss models spend a large and highly variable share of the completion budget
+# on reasoning tokens that never appear in the response. Measured on one identical
+# prompt, all three returning the same entities:
+#
+#   default   981 out,  ~426 JSON,  555 hidden  (57% of the budget)
+#   low       487 out,  ~396 JSON,   91 hidden  (19%)
+#   medium   1932 out,  ~426 JSON, 1506 hidden  (78%)
+#
+# When that reasoning runs long it consumes the whole ceiling before a single
+# character of JSON is emitted: finish_reason="length" with empty content, and the
+# batch is lost. "low" halves total output for identical results.
+REASONING_EFFORT = "low"
 LLM_TEMPERATURE = 0.1
 MAX_RETRIES = 2
 
 # One batch per shard, so parallelism is capped by the number of shards.
-PAGES_PER_BATCH = 3
+PAGES_PER_BATCH = 4
 MAX_PAGES = PAGES_PER_BATCH * len(EXTRACTION_SHARDS)
 ENTITIES_PER_BATCH = 8
+
+# A run that yields fewer than this has almost certainly lost a shard rather than
+# found a thin web. One more cheap call on the fast model recovers it, and costs
+# nothing on the runs that already succeeded.
+MIN_YIELD = 4
 
 # Context budget per section. Compact context measurably beats large context here:
 # the highest fill rate recorded came from a ~340-token prompt. Oversized prompts
@@ -259,6 +287,8 @@ async def _extract_batch(
             # A prior attempt may have proved json mode unusable for this payload.
             if json_mode and not degraded:
                 kwargs["response_format"] = {"type": "json_object"}
+            if model.startswith("openai/gpt-oss"):
+                kwargs["extra_body"] = {"reasoning_effort": REASONING_EFFORT}
 
             response = await client.chat.completions.create(**kwargs)
             choice = response.choices[0]
@@ -307,7 +337,15 @@ async def extract_entities(
         for i, batch in enumerate(batches)
     }
 
-    done, pending = await asyncio.wait(tasks.keys(), timeout=EXTRACT_DEADLINE)
+    done, pending = await asyncio.wait(
+        tasks.keys(), timeout=EXTRACT_DEADLINE, return_when=asyncio.FIRST_COMPLETED
+    )
+
+    # One shard is home, so there is something to show. Let the rest finish only if
+    # they are close behind.
+    if pending:
+        extra_done, pending = await asyncio.wait(pending, timeout=EXTRACT_GRACE)
+        done |= extra_done
 
     for task in pending:
         print(f"[extractor] deadline hit — abandoning shard {tasks[task]}")
@@ -321,6 +359,17 @@ async def extract_entities(
             entities.extend(task.result())
         except Exception as e:
             print(f"[extractor] shard {tasks[task]} failed: {str(e)[:120]}")
+
+    # Losing a shard to a deadline or a long reasoning excursion silently halves the
+    # pages that were actually read, and used to end the query with an empty or
+    # near-empty table. Top up from the pages the surviving shards never saw.
+    if len(entities) < MIN_YIELD and pages:
+        print(f"[extractor] low yield ({len(entities)}) — topping up on the fast shard")
+        model, json_mode = EXTRACTION_SHARDS[0]
+        extra = await _extract_batch(pages[:PAGES_PER_BATCH], plan, client, model, json_mode)
+        seen = {e.name.lower() for e in entities}
+        entities.extend(e for e in extra if e.name.lower() not in seen)
+        print(f"[extractor] top-up added {len(extra)} candidates")
 
     print(f"[extractor] {len(entities)} raw entities")
     return entities
