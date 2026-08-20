@@ -152,6 +152,10 @@ async def _worker(
     )
     if json_mode:
         kwargs["response_format"] = {"type": "json_object"}
+    if model.startswith("openai/gpt-oss"):
+        # See extractor.REASONING_EFFORT — over half the budget is otherwise spent
+        # on reasoning tokens that never reach the response.
+        kwargs["extra_body"] = {"reasoning_effort": "low"}
 
     try:
         response = await client.chat.completions.create(**kwargs)
