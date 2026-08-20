@@ -12,6 +12,12 @@ from backend.models import ScrapedPage, SearchResult
 # --- CONSTANTS ---
 MAX_CONTENT_CHARS = 12000
 MAX_CHUNK_CHARS = 6000
+
+# Upper bound on the HTML actually handed to the parser. Real pages ship several
+# megabytes of markup — the Eater Boston page alone is 2.4 MB — and parsing all of
+# it is pure CPU. Everything downstream is capped at MAX_CONTENT_CHARS anyway, so
+# the tail is discarded work. BeautifulSoup is lenient about a truncated document.
+MAX_HTML_CHARS = 800_000
 SCRAPE_TIMEOUT = 5
 CONCURRENCY = 16
 
@@ -262,7 +268,14 @@ async def _fetch_one(
                     content=result.snippet, error=f"Non-HTML content-type: {content_type}"
                 )
 
-            structure_map, chunks, cleaned = _parse_structure(resp.text, url)
+            # Parsing is CPU-bound and was running directly on the event loop, so a
+            # large page blocked every other coroutine — including the timers that
+            # enforce the scrape and extraction deadlines. On a small instance that
+            # starved extraction badly enough to return nothing at all. Off-loading
+            # it keeps the loop responsive.
+            structure_map, chunks, cleaned = await asyncio.to_thread(
+                _parse_structure, resp.text[:MAX_HTML_CHARS], url
+            )
 
             if len(cleaned) < 200:
                 cleaned = result.snippet or cleaned
