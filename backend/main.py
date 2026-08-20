@@ -268,5 +268,21 @@ async def clear_cache():
     query_cache.clear()
     return {"message": "Cache cleared"}
 
+class NoCacheStaticFiles(StaticFiles):
+    """Serves the frontend with revalidation forced on every request.
+
+    StaticFiles sends an ETag and Last-Modified but no Cache-Control, so browsers
+    apply heuristic freshness and will happily serve a stale index.html from disk
+    cache without ever asking the server. After a deploy that means users keep
+    seeing the previous build until they hard-refresh, which they have no reason
+    to know to do.
+    """
+
+    def file_response(self, *args, **kwargs):
+        """Attaches revalidation headers to every static response."""
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return response
+
 if os.path.isdir(FRONTEND_PATH):
-    app.mount("/", StaticFiles(directory=FRONTEND_PATH, html=True), name="frontend")
+    app.mount("/", NoCacheStaticFiles(directory=FRONTEND_PATH, html=True), name="frontend")
