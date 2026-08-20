@@ -197,29 +197,49 @@ def finalize_table(
         return entities, fields, []
 
     fields = list(fields)
-    dropped: list[str] = []
 
     def complete_rows(cols: list[str]) -> list[Entity]:
         """Rows carrying a value for every one of the given columns."""
         return [e for e in entities if cols and all(e.has_value(f) for f in cols)]
 
-    while len(complete_rows(fields)) < MIN_ROWS and len(fields) > MIN_LOOP_COLUMNS:
+    # Walk the whole ladder: at each rung drop the least-filled remaining column,
+    # which completes every row that was only missing that one value. Record the
+    # table each rung would produce.
+    ladder: list[tuple[list[str], int]] = [(list(fields), len(complete_rows(fields)))]
+    working = list(fields)
+    while len(working) > MIN_LOOP_COLUMNS:
         fill = {
-            f: sum(1 for e in entities if e.has_value(f)) / len(entities) for f in fields
+            f: sum(1 for e in entities if e.has_value(f)) / len(entities) for f in working
         }
-        worst = min(fields, key=lambda f: fill[f])
-        fields.remove(worst)
-        dropped.append(worst)
-        print(
-            f"[audit] dropped column '{worst}' ({fill[worst]:.0%} filled) "
-            f"to complete more rows"
-        )
+        working = [f for f in working if f != min(working, key=lambda f: fill[f])]
+        ladder.append((list(working), len(complete_rows(working))))
+
+    # Choose by how much filled table each rung actually yields, rather than
+    # stopping at the first rung that clears a row count. Stopping early strips the
+    # table to a single column the moment the data is sparse; scoring rows x columns
+    # keeps the widest table that still has rows in it. Ties prefer more columns.
+    def score(rung: tuple[list[str], int]) -> tuple[int, int]:
+        cols, n_rows = rung
+        if n_rows < MIN_ROWS:
+            # Below the row floor a rung is only a fallback, never a winner.
+            return (0, 0)
+        return (n_rows * len(cols), len(cols))
+
+    best_fields, _ = max(ladder, key=score)
+    if score((best_fields, len(complete_rows(best_fields)))) == (0, 0):
+        # Nothing clears the row floor: take the rung with the most complete rows.
+        best_fields, _ = max(ladder, key=lambda r: (r[1], len(r[0])))
+
+    dropped = [f for f in fields if f not in best_fields]
+    fields = best_fields
+    for field in dropped:
+        print(f"[audit] dropped column '{field}' to complete more rows")
 
     rows = complete_rows(fields)
 
-    # Last resort only: if nothing is complete even at the column floor, show the
-    # fullest rows rather than an empty table. These are the only rows that can
-    # still contain a gap, and the UI marks them.
+    # Last resort only: if nothing is complete even at the floor, show the fullest
+    # rows rather than an empty table. These are the only rows that can still
+    # contain a gap, and the UI marks them.
     if not rows:
         rows = [e for e in entities if any(e.has_value(f) for f in fields)]
         rows.sort(key=lambda e: e.fill_ratio(fields), reverse=True)
