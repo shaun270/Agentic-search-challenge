@@ -47,6 +47,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.on_event("startup")
+async def warm_cache_model():
+    """Loads the embedding model in the background so no user request pays for it."""
+    asyncio.create_task(asyncio.to_thread(query_cache.warm))
+
 class QueryRequest(BaseModel):
     """Pydantic model representing an incoming search query payload."""
 
@@ -70,7 +75,7 @@ async def run_pipeline(query: str) -> AsyncGenerator[str, None]:
     t0 = time.time()
 
     yield sse_event("status", {"stage": 0, "message": "Checking semantic cache..."})
-    cached = query_cache.search(query)
+    cached = await asyncio.to_thread(query_cache.search, query)
 
     if cached:
         elapsed = round(time.time() - t0, 3)
@@ -227,7 +232,7 @@ async def run_pipeline(query: str) -> AsyncGenerator[str, None]:
         sum(e.fill_ratio(kept_fields) for e in merged) / len(merged) if merged else 0.0
     )
     if merged and fill >= MIN_CACHEABLE_FILL:
-        query_cache.save(query, table_dump)
+        await asyncio.to_thread(query_cache.save, query, table_dump)
     else:
         print(f"[cache] not caching '{query}' — fill {fill:.0%} below "
               f"{MIN_CACHEABLE_FILL:.0%} threshold")
