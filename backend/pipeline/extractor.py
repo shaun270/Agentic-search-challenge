@@ -73,6 +73,13 @@ ENTITIES_PER_BATCH = 8
 # nothing on the runs that already succeeded.
 MIN_YIELD = 4
 
+# Tried only when the fast shards have all failed outright. It sits on a different,
+# much larger token bucket, so it still answers when the 8k buckets are exhausted.
+FALLBACK_SHARD = ("groq/compound-mini", False)
+
+class ExtractionUnavailable(RuntimeError):
+    """Every extraction shard failed. Distinct from finding nothing on the pages."""
+
 # Context budget per section. Compact context measurably beats large context here:
 # the highest fill rate recorded came from a ~340-token prompt. Oversized prompts
 # also 429 the 8k buckets and 413 the compound family outright.
@@ -302,7 +309,10 @@ async def _extract_batch(
             msg = str(e)
             print(f"[extractor] {model} attempt {attempt+1}/{MAX_RETRIES}: {msg[:160]}")
             if attempt == MAX_RETRIES - 1:
-                return []
+                # None means the shard failed; [] would mean it found nothing.
+                # Conflating the two is what turned a rate limit into a silent
+                # empty table with no explanation for the user.
+                return None
             # Server-side JSON validation rejects the whole call when a completion
             # truncates. Retrying in plain text lets _safe_parse repair it instead.
             if "validate JSON" in msg or "json_validate" in msg:
@@ -354,22 +364,44 @@ async def extract_entities(
         await asyncio.gather(*pending, return_exceptions=True)
 
     entities: list[Entity] = []
+    failures = len(pending)
     for task in done:
         try:
-            entities.extend(task.result())
+            result = task.result()
         except Exception as e:
             print(f"[extractor] shard {tasks[task]} failed: {str(e)[:120]}")
+            failures += 1
+            continue
+        if result is None:
+            failures += 1
+        else:
+            entities.extend(result)
 
     # Losing a shard to a deadline or a long reasoning excursion silently halves the
     # pages that were actually read, and used to end the query with an empty or
     # near-empty table. Top up from the pages the surviving shards never saw.
     if len(entities) < MIN_YIELD and pages:
-        print(f"[extractor] low yield ({len(entities)}) — topping up on the fast shard")
-        model, json_mode = EXTRACTION_SHARDS[0]
+        # If the fast shards failed rather than came up short, they are almost
+        # certainly rate limited, so retrying them is pointless — go to the shard
+        # on the larger bucket instead.
+        model, json_mode = (
+            FALLBACK_SHARD if failures >= len(batches) else EXTRACTION_SHARDS[0]
+        )
+        print(f"[extractor] low yield ({len(entities)}, {failures} shard failures) "
+              f"— topping up on {model}")
         extra = await _extract_batch(pages[:PAGES_PER_BATCH], plan, client, model, json_mode)
-        seen = {e.name.lower() for e in entities}
-        entities.extend(e for e in extra if e.name.lower() not in seen)
-        print(f"[extractor] top-up added {len(extra)} candidates")
+        if extra is None:
+            failures += 1
+        else:
+            seen = {e.name.lower() for e in entities}
+            entities.extend(e for e in extra if e.name.lower() not in seen)
+            print(f"[extractor] top-up added {len(extra)} candidates")
+
+    if not entities and failures:
+        raise ExtractionUnavailable(
+            "The language model provider rejected every extraction request "
+            "(usually the free-tier rate limit). Wait a minute and try again."
+        )
 
     print(f"[extractor] {len(entities)} raw entities")
     return entities
